@@ -1,14 +1,12 @@
 # RPC Coercion Filter
 
-Блокировка RPC-интерфейсов, используемых в атаках coerced authentication (NTLM Relay).
+Набор RPC-фильтров, который закрывает интерфейсы, через которые проводят coerced authentication (NTLM Relay): PrinterBug, PetitPotam, DFSCoerce и родственные атаки. Фильтры ставятся через `netsh rpc filter` и блокируют вызовы к нужным UUID.
 
-> ⚠️ **ВАЖНО: Печать через Print Spooler (MS-RPRN) перестанет работать на хостах где применён фильтр.**
-> Если в инфраструктуре используются принтеры через DC — перед применением отключите службу Spooler
-> на контроллерах домена и перенесите печать на отдельный print-сервер, не являющийся DC.
+
 
 ---
 
-## Покрытые векторы
+## Что блокируется
 
 | Атака           | Протокол  | UUID                                   |
 |-----------------|-----------|----------------------------------------|
@@ -24,23 +22,20 @@
 
 ---
 
-## Влияние на инфраструктуру
+## Что сломается, а что нет
 
-| Функциональность | Результат после применения |
-|------------------|---------------------------|
-| Печать через DC (Print Spooler) | ❌ Не работает |
-| Печать через отдельный print-сервер (не DC) | ✅ Работает |
-| Доменная аутентификация | ✅ Не затронута |
-| Групповые политики | ✅ Не затронуты |
-| Репликация между DC | ✅ Не затронута |
-| DFS (доступ к файлам, `\\domain\share`) | ✅ Работает — MS-DFSC идёт через SMB, не RPC |
-| DFS администрирование (`dfsmgmt.msc`, PowerShell) | ❌ Не работает — MS-DFSNM заблокирован |
-| EFS (шифрование файлов) | ⚠️ Проверить — MS-EFSR заблокирован |
-| Теневые копии VSS | ⚠️ Проверить — MS-FSRVP заблокирован |
+| Функциональность | После применения |
+|------------------|------------------|
+| Печать через DC (Print Spooler) | Не работает |
+| DFS-администрирование (`dfsmgmt.msc`, PowerShell) | Не работает: MS-DFSNM заблокирован |
+| EFS (шифрование файлов) | Проверьте у себя: MS-EFSR заблокирован |
+| Теневые копии VSS | Проверьте у себя: MS-FSRVP заблокирован |
 
-### Рекомендация по печати
 
-Перед применением фильтра на DC:
+
+### Про печать
+
+Перед тем как применять фильтр на DC, отключите Spooler:
 
 ```cmd
 :: Отключить Print Spooler на контроллерах домена
@@ -48,37 +43,35 @@ sc config spooler start= disabled
 net stop spooler
 ```
 
-Печать должна работать через выделенный print-сервер, не являющийся DC.
-Это правильная практика вне зависимости от данного фильтра.
+Печатать нужно через выделенный print-сервер, который не является DC. Так стоит делать и без этого фильтра: Spooler на контроллере домена давно считается плохой идеей.
 
 ---
 
-## Персистентность
+## Фильтры не переживают перезагрузку
 
-RPC-фильтры **сбрасываются при перезагрузке**. Для постоянного применения необходимо
-настроить автоматический запуск через GPO + Scheduled Task (см. раздел «Деплой»).
+RPC-фильтры, добавленные через `netsh`, после рестарта пропадают. Поэтому одного запуска скрипта мало. Нужно, чтобы он выполнялся при каждом старте хоста. Для этого ниже связка GPO и Scheduled Task.
 
 ---
 
-## Деплой на все компьютеры домена
+## Раскатка на домен
 
-Рекомендуемый способ: **GPO + Scheduled Task**.
-GPO доставляет скрипт на хост, Scheduled Task обеспечивает запуск при каждом старте от SYSTEM,
-до входа любого пользователя.
+GPO кладёт скрипт на хост, а Scheduled Task запускает его при каждой загрузке от SYSTEM, ещё до входа любого пользователя.
 
-### Шаг 1 — Разместить скрипт в SYSVOL
+### 1. Положите скрипт в SYSVOL
 
 ```
 \\corp.local\SYSVOL\corp.local\scripts\rpc_coerce_filter.cmd
 ```
 
-### Шаг 2 — Создать GPO
+Домен `corp.local` здесь для примера, подставьте свой.
 
-1. Открыть `gpmc.msc`
-2. Правой кнопкой на нужный OU (или весь домен) → **Create a GPO and Link it here**
-3. Назвать: `RPC Coercion Filter`
+### 2. Создайте GPO
 
-### Шаг 3 — GPO: скопировать скрипт на хост
+1. Откройте `gpmc.msc`.
+2. Правой кнопкой на нужный OU (или на весь домен) → **Create a GPO and Link it here**.
+3. Назовите его `RPC Coercion Filter`.
+
+### 3. Скопируйте скрипт на хосты
 
 `Computer Configuration → Preferences → Windows Settings → Files`
 
@@ -88,30 +81,28 @@ GPO доставляет скрипт на хост, Scheduled Task обеспе
 | Source | `\\corp.local\SYSVOL\corp.local\scripts\rpc_coerce_filter.cmd` |
 | Destination | `C:\Windows\System32\rpc_coerce_filter.cmd` |
 
-### Шаг 4 — GPO: создать Scheduled Task (персистентность)
+### 4. Создайте Scheduled Task
 
-`Computer Configuration → Preferences → Control Panel Settings → Scheduled Tasks`
-`→ New → Scheduled Task (At least Windows 7)`
+`Computer Configuration → Preferences → Control Panel Settings → Scheduled Tasks → New → Scheduled Task (At least Windows 7)`
 
 | Поле | Значение |
 |------|----------|
 | Action | Replace |
 | Name | RPC Coercion Filter |
 | Run As | SYSTEM |
-| Run with highest privileges | ✅ |
+| Run with highest privileges | включить |
 | Trigger | At startup |
 | Execute | `netsh.exe` |
 | Arguments | `-f C:\Windows\System32\rpc_coerce_filter.cmd` |
 | Stop task if runs longer than | 5 minutes |
 
-### Шаг 5 — GPO: Immediate Task (применить без перезагрузки)
+### 5. Добавьте Immediate Task
 
-`Scheduled Tasks → New → Immediate Task (At least Windows 7)`
+Без неё фильтры появятся только после перезагрузки. Чтобы они встали сразу, создайте ещё `Scheduled Tasks → New → Immediate Task (At least Windows 7)`.
 
-Те же настройки, триггер **Once** с датой в прошлом —
-выполнится сразу при следующем применении GPO на хосте.
+Настройки те же, триггер **Once** с датой в прошлом. Задача выполнится, как только хост применит GPO.
 
-### Шаг 6 — Принудительное применение GPO
+### 6. Примените GPO принудительно
 
 ```powershell
 $computers = Get-ADComputer -Filter * | Select-Object -ExpandProperty Name
@@ -123,65 +114,26 @@ Invoke-Command -ComputerName $computers -ScriptBlock {
 
 ---
 
-## Проверка применения
+## Как проверить, что всё встало
 
-### На одной машине
 
 ```cmd
 netsh rpc filter show filter
 ```
 
-Должно быть 9 правил с `actiontype = block`.
+Должно быть N правил с `actiontype = block`.
 
-### На всех машинах домена
 
-```powershell
-$computers = Get-ADComputer -Filter * | Select-Object -ExpandProperty Name
-
-Invoke-Command -ComputerName $computers -ScriptBlock {
-    $task = Get-ScheduledTask -TaskName "RPC Coercion Filter" -ErrorAction SilentlyContinue
-    $filters = (netsh rpc filter show filter 2>&1 | Select-String "actiontype\s*=\s*block").Count
-    [PSCustomObject]@{
-        Computer    = $env:COMPUTERNAME
-        TaskExists  = ($null -ne $task)
-        TaskState   = if ($task) { $task.State } else { "Missing" }
-        FilterCount = $filters
-        Status      = if ($filters -eq 9) { "OK" } else { "MISSING" }
-    }
-} -ErrorAction SilentlyContinue | Sort-Object Status | Format-Table -AutoSize
-```
 
 ---
 
-## Удаление фильтров
+## Как всё откатить
 
-### На одной машине
 
 ```cmd
 netsh rpc filter
 delete filter filterkey=all
 quit
 ```
-
-### На всех машинах домена
-
-```powershell
-$computers = Get-ADComputer -Filter * | Select-Object -ExpandProperty Name
-
-Invoke-Command -ComputerName $computers -ScriptBlock {
-    netsh rpc filter
-    delete filter filterkey=all
-    quit
-} -ErrorAction SilentlyContinue
-```
-
-### Удалить Scheduled Task
-
-```powershell
-Invoke-Command -ComputerName $computers -ScriptBlock {
-    Unregister-ScheduledTask -TaskName "RPC Coercion Filter" -Confirm:$false -ErrorAction SilentlyContinue
-} -ErrorAction SilentlyContinue
-```
-
 
 
